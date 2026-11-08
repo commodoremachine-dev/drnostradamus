@@ -111,8 +111,13 @@ def cmd_test():
 
 
 # ------------------------------------------------------------------ canlı kullanım
-def value_table(r, odds_1x2=None, odds_ou=None) -> pd.DataFrame:
-    """Bir maç için adil/model olasılığı, adil oran, verilen oran ve EV tablosu."""
+def value_table(r, odds_1x2=None, odds_ou=None, odds_kg=None, odds_cs=None) -> pd.DataFrame:
+    """Bir maç için adil/model olasılığı, adil oran, verilen oran ve EV tablosu.
+
+    odds_kg = (KG Var, KG Yok), odds_cs = (1-X, 1-2, X-2): verilirse bu satırlar da eklenir.
+    value_uygun: VALUE işareti alabilir mi. KG satırlarının adil olasılığı piyasadan değil
+    yalnızca modelden geldiği için (geçmişte zarar ettirdi) işaret almazlar.
+    """
     from predict import match_markets
     _, mk = match_markets(r, use_market=False)   # piyasadan bağımsız model olasılığı
     _, fk = match_markets(r, use_market=True)    # adil olasılık (piyasa oranı varsa piyasa + model)
@@ -129,8 +134,31 @@ def value_table(r, odds_1x2=None, odds_ou=None) -> pd.DataFrame:
                              ("2.5 Alt", 1 - mk["p_over25"], 1 - fk["p_over25"], odds_ou[1] if odds_ou else None)):
         rows.append(dict(secim=name, p_model=p, p_adil=pf, adil_oran=1 / pf if pf > 0 else np.nan, oran=dec,
                          ev_adil=ev(pf, dec) if dec else np.nan, ev_model=ev(p, dec) if dec else np.nan,
-                         piyasa_var=has_mkt))
+                         piyasa_var=has_mkt, value_uygun=True))
+    extra = []
+    if odds_cs:
+        for name, a, b, dec in (("1-X", "p_home", "p_draw", odds_cs[0]), ("1-2", "p_home", "p_away", odds_cs[1]),
+                                ("X-2", "p_draw", "p_away", odds_cs[2])):
+            extra.append((name, mk[a] + mk[b], fk[a] + fk[b], dec, True))
+    if odds_kg:
+        extra += [("KG Var", mk["p_btts"], fk["p_btts"], odds_kg[0], False),
+                  ("KG Yok", 1 - mk["p_btts"], 1 - fk["p_btts"], odds_kg[1], False)]
+    for name, p, pf, dec, ok in extra:
+        rows.append(dict(secim=name, p_model=p, p_adil=pf, adil_oran=1 / pf if pf > 0 else np.nan, oran=dec,
+                         ev_adil=ev(pf, dec) if dec else np.nan, ev_model=ev(p, dec) if dec else np.nan,
+                         piyasa_var=has_mkt, value_uygun=ok))
     return pd.DataFrame(rows)
+
+
+def bet_won(pick, hs, as_):
+    """Bir seçimin skorla kazanıp kazanmadığı (takip raporu için)."""
+    if not isinstance(pick, str):
+        return False
+    res = "1" if hs > as_ else "X" if hs == as_ else "2"
+    tot, btts = hs + as_, hs > 0 and as_ > 0
+    return {"1": res == "1", "X": res == "X", "2": res == "2", "2.5 Üst": tot > 2, "2.5 Alt": tot <= 2,
+            "1-X": res != "2", "1-2": res != "X", "X-2": res != "1",
+            "KG Var": btts, "KG Yok": not btts}.get(pick, False)
 
 
 def print_value(r, tbl: pd.DataFrame):

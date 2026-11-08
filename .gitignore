@@ -7,3 +7,4 @@ iddaa_study/raw/
 ilan_bot/**/*_files/
 oranlar.csv
 tum_oranlar.csv
+data/nesine_son.json.gz

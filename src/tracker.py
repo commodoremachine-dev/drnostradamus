@@ -26,6 +26,12 @@ from teams import normalize  # noqa: E402
 warnings.filterwarnings("ignore")
 ROOT = Path(__file__).resolve().parents[1]
 LOG = ROOT / "data" / "predictions_log.csv"
+HISTORY = ROOT / "data" / "oran_gecmisi.csv"  # her kaydette alınan iddaa oranları (oran hareketi için)
+
+
+def _naive(t):
+    t = pd.Timestamp(t)
+    return t.tz_convert(None) if t.tzinfo else t
 
 
 def live_events(year=None):
@@ -78,7 +84,7 @@ def cmd_kaydet(days: int):
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     odds_cols = [c for c in ("dec_h", "dec_d", "dec_a", "dec_over25", "dec_under25") if c in matches.columns]
     odds_map = matches.set_index(["season", "home", "away"])[odds_cols]
-    rows = []
+    rows, history = [], []
     for r in res.itertuples(index=False):
         m, mk = match_markets(r)
         u = upset_info(r) or {}
@@ -93,11 +99,21 @@ def cmd_kaydet(days: int):
         # Bültendeki maçlarda oynanabilir iddaa oranı (Nesine) kullanılır; yoksa ESPN/Bet365
         odds_src = "ESPN/Bet365" if o1x2 else None
         nz = find_odds(r.date, r.home, r.away)
+        okg = ocs = None
         if nz and nz["o1x2"]:
             o1x2, oou, odds_src = nz["o1x2"], nz["oou"] or oou, "Nesine"
-        vt = value_table(r, o1x2, oou)
-        best = vt.dropna(subset=["ev_adil"]).sort_values("ev_adil", ascending=False)
+            okg, ocs = nz["okg"], nz["ocs"]
+        vt = value_table(r, o1x2, oou, okg, ocs)
+        best = vt[vt.value_uygun].dropna(subset=["ev_adil"]).sort_values("ev_adil", ascending=False)
         best = best[best.ev_adil > VALUE_MIN_EV].head(1)
+        if nz and nz["o1x2"] and not nz["eski"] and _naive(r.kickoff_utc) > pd.Timestamp(stamp):
+            history.append(dict(
+                zaman_utc=stamp, espn_id=r.espn_id, kickoff_utc=r.kickoff_utc, home=r.home, away=r.away,
+                o_1=o1x2[0], o_x=o1x2[1], o_2=o1x2[2],
+                o_ust=oou[0] if oou else np.nan, o_alt=oou[1] if oou else np.nan,
+                o_kgvar=okg[0] if okg else np.nan, o_kgyok=okg[1] if okg else np.nan,
+                o_1x=ocs[0] if ocs else np.nan, o_12=ocs[1] if ocs else np.nan, o_x2=ocs[2] if ocs else np.nan,
+                mbs=nz["mbs"], marj=nz["marj"], value_pick=best.secim.iloc[0] if len(best) else None))
         pick = ["1", "X", "2"][int(np.argmax([mk["p_home"], mk["p_draw"], mk["p_away"]]))]
         rows.append(dict(
             espn_id=r.espn_id, kickoff_utc=r.kickoff_utc, date=r.date, home=r.home, away=r.away,
@@ -115,7 +131,11 @@ def cmd_kaydet(days: int):
             value_pick=best.secim.iloc[0] if len(best) else None,
             value_odds=best.oran.iloc[0] if len(best) else np.nan,
             value_ev=round(best.ev_adil.iloc[0], 4) if len(best) else np.nan,
-            odds_src=odds_src))
+            odds_src=odds_src, mbs=nz["mbs"] if nz else np.nan, marj=nz["marj"] if nz else np.nan))
+    if history:
+        h = pd.DataFrame(history)
+        h.to_csv(HISTORY, mode="a", header=not HISTORY.exists(), index=False, encoding="utf-8")
+        print(f"Oran geçmişi: {len(h)} maçın iddaa oranı eklendi -> {HISTORY.name}")
     new = pd.DataFrame(rows)
     log = load_log()
     if not log.empty:
@@ -166,15 +186,68 @@ def status_frames():
     ozet = {"mac": len(done), "isabet_1x2": done.hit_1x2.mean(), "isabet_skor": done.hit_score.mean(),
             "isabet_o25": done.hit_o25.mean(), "favori_kaybetti": int(done.fav_lost.sum())}
     if "value_pick" in done.columns:
-        tot = done.hs + done.as_
-        won = [(isinstance(vp, str)) and ((vp in ("1", "X", "2") and vp == rs) or (vp == "2.5 Üst" and t > 2)
-                                         or (vp == "2.5 Alt" and t <= 2))
-               for vp, rs, t in zip(done.value_pick, done.res, tot)]
-        done["value_kar"] = np.where(done.value_pick.notna(), np.where(won, done.value_odds - 1, -1.0), np.nan)
-        vb = done.value_kar.dropna()
-        if len(vb):
-            ozet.update(value_bahis=len(vb), value_kar=vb.sum(), value_roi=vb.mean())
+        _add_value_profit(done)
+        for key, part in _by_source(done):
+            vb = part.value_kar.dropna()
+            if len(vb):
+                ozet.update({f"value_bahis{key}": len(vb), f"value_kar{key}": vb.sum(), f"value_roi{key}": vb.mean()})
+    c = clv_summary(done)
+    if c:
+        ozet.update(c)
     return log, done, ozet
+
+
+ODDS_COL = {"1": "o_1", "X": "o_x", "2": "o_2", "2.5 Üst": "o_ust", "2.5 Alt": "o_alt", "KG Var": "o_kgvar",
+            "KG Yok": "o_kgyok", "1-X": "o_1x", "1-2": "o_12", "X-2": "o_x2"}
+
+
+def _add_value_profit(done):
+    from value import bet_won
+    won = [bet_won(vp, h, a) for vp, h, a in zip(done.value_pick, done.hs, done.as_)]
+    done["value_kar"] = np.where(done.value_pick.notna(), np.where(won, done.value_odds - 1, -1.0), np.nan)
+    return won
+
+
+def _by_source(done):
+    """Value kâr/zararı oran kaynağına göre: '' tümü, '_iddaa' Nesine, '_bet365' diğer."""
+    src = done["odds_src"] if "odds_src" in done.columns else pd.Series(None, index=done.index)
+    yield "", done
+    yield "_iddaa", done[src == "Nesine"]
+    yield "_bet365", done[src != "Nesine"]
+
+
+def clv_summary(done):
+    """Oran hareketi (CLV): seçimin ilk kayıttaki iddaa oranı / maç öncesi son oranı - 1.
+
+    Pozitifse oran sonradan düşmüş, yani piyasa da o tarafa kaymış demektir: avantajın en hızlı
+    görülen işareti. Bitmiş maçlar ve data/oran_gecmisi.csv gerekir.
+    """
+    if not HISTORY.exists() or done.empty:
+        return {}
+    h = pd.read_csv(HISTORY, dtype={"espn_id": str, "value_pick": str})
+    h = h[pd.to_datetime(h.zaman_utc) < pd.to_datetime(h.kickoff_utc)].sort_values("zaman_utc")
+    out = {}
+    for name, col in (("tahmin", "pick"), ("value", "value_pick")):
+        moves = []
+        for r in done.itertuples():
+            pick = getattr(r, col, None)
+            g = h[h.espn_id == str(r.espn_id)]
+            if not isinstance(pick, str) or pick not in ODDS_COL or len(g) < 2:
+                continue
+            if col == "value_pick":  # value seçiminin ilk ortaya çıktığı andaki oran
+                first = g[g.value_pick == pick]
+                if first.empty:
+                    continue
+                o_open = first[ODDS_COL[pick]].iloc[0]
+            else:
+                o_open = g[ODDS_COL[pick]].iloc[0]
+            o_close = g[ODDS_COL[pick]].iloc[-1]
+            if o_open > 1 and o_close > 1:
+                moves.append(o_open / o_close - 1)
+        if moves:
+            out.update({f"clv_{name}_n": len(moves), f"clv_{name}": float(np.mean(moves)),
+                        f"clv_{name}_pozitif": float(np.mean(np.array(moves) > 0))})
+    return out
 
 
 def cmd_durum():
@@ -237,15 +310,20 @@ def cmd_durum():
         print(f"  Bahis piyasası isabeti   : %{100 * (mp == mres).mean():.1f}  ({len(mk)} oranlı maç; model aynı maçlarda "
               f"%{100 * mk.hit_1x2.mean():.1f})")
     if "value_pick" in done.columns:
-        vb = done[done.value_pick.notna()].copy()
-        if len(vb):
-            tot = vb.hs + vb.as_
-            won = [(vp == "1" and rs == "1") or (vp == "X" and rs == "X") or (vp == "2" and rs == "2")
-                   or (vp == "2.5 Üst" and t > 2) or (vp == "2.5 Alt" and t <= 2)
-                   for vp, rs, t in zip(vb.value_pick, vb.res, tot)]
-            vb["kar"] = np.where(won, vb.value_odds - 1, -1.0)
-            print(f"  Value bet (1 birim)      : {len(vb)} bahis, {int(sum(won))} kazandı, "
-                  f"kâr {vb.kar.sum():+.2f} birim, ROI %{100 * vb.kar.mean():+.1f}")
+        _add_value_profit(done)
+        labels = {"": "Value bet (1 birim)      ", "_iddaa": "  iddaa oranıyla         ",
+                  "_bet365": "  ESPN/Bet365 oranıyla   "}
+        for key, part in _by_source(done):
+            vb = part.value_kar.dropna()
+            if len(vb) and (key == "" or len(vb) < len(done.value_kar.dropna()) or key == "_iddaa"):
+                print(f"  {labels[key]}: {len(vb)} bahis, {int((vb > 0).sum())} kazandı, "
+                      f"kâr {vb.sum():+.2f} birim, ROI %{100 * vb.mean():+.1f}")
+    c = clv_summary(done)
+    for name, label in (("tahmin", "Tahmin edilen sonuç"), ("value", "Value seçimleri")):
+        if c.get(f"clv_{name}_n"):
+            print(f"  Oran hareketi ({label}): ilk orana göre son oran ortalama %{100 * c[f'clv_{name}']:+.1f} "
+                  f"({c[f'clv_{name}_n']} maç, %{100 * c[f'clv_{name}_pozitif']:.0f}'inde oran düştü). "
+                  f"Pozitif = piyasa sonradan modelin tarafına kaydı.")
     print(f"  Favori kaybetti          : {int(done.fav_lost.sum())} maç")
     for lv in ["düşük", "orta", "yüksek", "çok yüksek"]:
         g = done[done.upset_level == lv]

@@ -125,6 +125,67 @@ class NesineMatchTests(unittest.TestCase):
     def test_other_day_is_not_matched(self):
         self.assertIsNone(self.n.find_odds("2026-11-21", "Çaykur Rizespor", "Erzurumspor"))
 
+    def test_margin_and_closed_double_chance_option(self):
+        ev = self.n._cache["events"][0]
+        ev["MA"] += [dict(MT=2, MST=89, SOV=0.0, MBS=1, OCA=[dict(N=1, O=1.44), dict(N=2, O=2.02)]),
+                     dict(MT=2, MST=92, SOV=0.0, MBS=1, OCA=[dict(N=1, O=1.0), dict(N=2, O=1.14), dict(N=3, O=1.7)])]
+        r = self.n.find_odds("2026-11-08", "Çaykur Rizespor", "Erzurumspor")
+        self.assertEqual(r["okg"], (1.44, 2.02))
+        self.assertEqual(r["ocs"], (None, 1.14, 1.7))  # 1.00 = kapalı
+        self.assertAlmostEqual(r["marj"], 1 / 1.64 + 1 / 3.3 + 1 / 3.65 - 1, places=3)
+
+
+class NesineOfflineTests(unittest.TestCase):
+    def test_uses_saved_bulletin_when_connection_drops(self):
+        import gzip
+        import json
+        import tempfile
+        import nesine
+        saved = dict(nesine._cache)
+        self.addCleanup(nesine._cache.update, saved)
+        self.addCleanup(setattr, nesine, "DISK", nesine.DISK)
+        self.addCleanup(setattr, nesine, "_download", nesine._download)
+
+        def fail():
+            raise ConnectionResetError("koptu")
+        with tempfile.TemporaryDirectory() as d:
+            nesine.DISK = Path(d) / "son.json.gz"
+            nesine._download = fail
+            nesine._cache.update(t=0.0, events=None)
+            with self.assertRaises(OSError):  # kayıtlı bülten de yoksa hata
+                nesine.bulletin()
+            ev = [dict(C=1, D="08.11.2026", HN="Rizespor", AN="Erzurumspor FK", MA=[])]
+            nesine.DISK.write_bytes(gzip.compress(json.dumps(ev).encode()))
+            nesine._cache.update(t=0.0, events=None)
+            self.assertEqual(nesine.bulletin(), ev)
+            self.assertTrue(nesine._cache["stale"])
+            self.assertIn("koptu", nesine.last_error)
+
+
+class TrackingTests(unittest.TestCase):
+    def test_bet_won_all_markets(self):
+        from value import bet_won
+        won = {p for p in ("1", "X", "2", "2.5 Üst", "2.5 Alt", "1-X", "1-2", "X-2", "KG Var", "KG Yok")
+               if bet_won(p, 2, 1)}
+        self.assertEqual(won, {"1", "2.5 Üst", "1-X", "1-2", "KG Var"})
+        self.assertFalse(bet_won(None, 1, 0))
+
+    def test_closing_line_value(self):
+        import tempfile
+        import tracker
+        self.addCleanup(setattr, tracker, "HISTORY", tracker.HISTORY)
+        with tempfile.TemporaryDirectory() as d:
+            tracker.HISTORY = Path(d) / "h.csv"
+            base = dict(espn_id="7", kickoff_utc="2026-11-08 18:00:00", o_x=3.3, o_2=4.0)
+            pd.DataFrame([dict(base, zaman_utc="2026-11-08 10:00:00", o_1=2.00, value_pick="1"),
+                          dict(base, zaman_utc="2026-11-08 17:00:00", o_1=1.80, value_pick=None),
+                          dict(base, zaman_utc="2026-11-08 19:00:00", o_1=1.20, value_pick=None)]  # maç sonrası
+                         ).to_csv(tracker.HISTORY, index=False)
+            done = pd.DataFrame([dict(espn_id="7", pick="1", value_pick="1")])
+            c = tracker.clv_summary(done)
+        self.assertAlmostEqual(c["clv_value"], 2.00 / 1.80 - 1)  # maç sonrası kayıt sayılmaz
+        self.assertEqual(c["clv_tahmin_n"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -123,13 +123,19 @@ class Data:
         # Bültendeki maçlar için güncel iddaa oranları (Nesine); yoksa yukarıdakiler kalır
         import nesine
         nz = nesine.find_odds(date, home, away)
+        okg = ocs = mbs = None
         if nz and nz["o1x2"]:
-            o1x2, oou = nz["o1x2"], nz["oou"] or oou
-            src = f"iddaa (Nesine, {datetime.now():%H:%M} itibarıyla, MBS {nz['mbs']})"
+            o1x2, oou, okg, ocs, mbs = nz["o1x2"], nz["oou"] or oou, nz["okg"], nz["ocs"], nz["mbs"]
+            src = (f"iddaa (Nesine, {nz['zaman']} itibarıyla"
+                   + (", bağlantı koptuğu için son kaydedilen bülten" if nz["eski"] else "")
+                   + "). Bu maçta iddaa payı "
+                   f"%{100 * nz['marj']:.1f} (1X2); "
+                   + ("tek maç oynanabilir (MBS 1)" if mbs == 1 else f"en az {mbs} maçlık kuponla oynanır"))
         elif nesine.last_error and src:
             src += " (Nesine'ye ulaşılamadı)"
         return dict(r=r, mat=mat, fin=fin, mod=mod, upset=upset_info(r), why=explain(r, fin, mod),
-                    value=value_table(r, o1x2, oou), o1x2=o1x2, oou=oou, src=src)
+                    value=value_table(r, o1x2, oou, okg, ocs), o1x2=o1x2, oou=oou, okg=okg, ocs=ocs,
+                    mbs=mbs, src=src)
 
 
 # ====================================================================== maç detayı
@@ -161,7 +167,7 @@ class DetailView(ttk.Frame):
         self.grid_cv.pack(anchor="w")
 
         ttk.Label(right, text="Neden?", style="H2.TLabel").pack(anchor="w")
-        self.why = tk.Text(right, height=9, wrap="word", font=FONT, bd=0, bg="#f9fafb", padx=8, pady=6)
+        self.why = tk.Text(right, height=7, wrap="word", font=FONT, bd=0, bg="#f9fafb", padx=8, pady=6)
         self.why.pack(fill="x", pady=(2, 8))
         for k, c in (("ev", C_HOME), ("dep", C_AWAY), ("nötr", "#374151")):
             self.why.tag_configure(k, foreground=c)
@@ -172,21 +178,30 @@ class DetailView(ttk.Frame):
         self.odds = {}
         ef = ttk.Frame(right, style="Card.TFrame")
         ef.pack(fill="x", pady=4)
-        for i, k in enumerate(("1", "X", "2", "2.5 Üst", "2.5 Alt")):
-            ttk.Label(ef, text=k, style="Card.TLabel").grid(row=0, column=2 * i, padx=(0 if i == 0 else 8, 2))
-            e = ttk.Entry(ef, width=6)
-            e.grid(row=0, column=2 * i + 1)
-            self.odds[k] = e
-        ttk.Button(ef, text="Hesapla", command=self.recalc_value).grid(row=0, column=10, padx=8)
+        for row, keys in enumerate((("1", "X", "2", "2.5 Üst", "2.5 Alt"), ("1-X", "1-2", "X-2", "KG Var", "KG Yok"))):
+            for i, k in enumerate(keys):
+                ttk.Label(ef, text=k, style="Card.TLabel").grid(row=row, column=2 * i, padx=(0 if i == 0 else 8, 2),
+                                                                pady=1, sticky="e")
+                e = ttk.Entry(ef, width=6)
+                e.grid(row=row, column=2 * i + 1, pady=1)
+                self.odds[k] = e
+        ttk.Button(ef, text="Hesapla", command=self.recalc_value).grid(row=0, column=10, rowspan=2, padx=8)
 
         cols = ("secim", "adil", "adil_oran", "oran", "ev_adil", "model", "ev_model", "isaret")
-        self.vt = ttk.Treeview(right, columns=cols, show="headings", height=5)
+        tf = ttk.Frame(right, style="Card.TFrame")
+        tf.pack(fill="x")
+        # 7 satır görünür, kalanı kaydırılır (alttaki not ve düğme ekranda kalsın)
+        self.vt = ttk.Treeview(tf, columns=cols, show="headings", height=7)
+        sb = ttk.Scrollbar(tf, orient="vertical", command=self.vt.yview)
+        self.vt.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
         for c, t, w in zip(cols, ("Seçim", "Adil %", "Adil oran", "Oran", "EV (adil)", "Model %", "EV (model)", ""),
                            (70, 60, 70, 55, 75, 65, 80, 70)):
             self.vt.heading(c, text=t)
             self.vt.column(c, width=int(w * S), anchor="center")
         self.vt.tag_configure("value", background="#dcfce7")
-        self.vt.pack(fill="x")
+        self.vt.tag_configure("mbs", background="#fef9c3")
+        self.vt.pack(side="left", fill="x", expand=True)
         self.vnote = ttk.Label(right, text="", style="Muted.TLabel", wraplength=int(600 * S), justify="left")
         self.vnote.pack(anchor="w", pady=(4, 6))
 
@@ -234,9 +249,12 @@ class DetailView(ttk.Frame):
         if info["o1x2"]:
             for k, v in zip(("1", "X", "2"), info["o1x2"]):
                 self.odds[k].insert(0, f"{v:.2f}")
-        if info["oou"]:
-            for k, v in zip(("2.5 Üst", "2.5 Alt"), info["oou"]):
-                self.odds[k].insert(0, f"{v:.2f}")
+        for key, names in (("oou", ("2.5 Üst", "2.5 Alt")), ("ocs", ("1-X", "1-2", "X-2")),
+                           ("okg", ("KG Var", "KG Yok"))):
+            if info.get(key):
+                for k, v in zip(names, info[key]):
+                    if v:  # kapalı seçenek boş kalır
+                        self.odds[k].insert(0, f"{v:.2f}")
         self._fill_value(info["value"], src=info.get("src"))
 
     def _draw_bars(self, fin):
@@ -282,9 +300,15 @@ class DetailView(ttk.Frame):
     def _fill_value(self, vt, src=None):
         from value import VALUE_MIN_EV
         self.vt.delete(*self.vt.get_children())
+        mbs = (self.info or {}).get("mbs") or 1
         for t in vt.itertuples():
-            flag = "VALUE" if not pd.isna(t.ev_adil) and t.ev_adil > VALUE_MIN_EV else ""
-            self.vt.insert("", "end", tags=("value",) if flag else (), values=(
+            uygun = getattr(t, "value_uygun", True)
+            flag = ""
+            if not pd.isna(t.ev_adil) and t.ev_adil > VALUE_MIN_EV:
+                # KG: adil olasılık yalnızca modelden, işaret verilmez; MBS>1: tek oynanamaz
+                flag = "yalnız model" if not uygun else ("VALUE" if mbs <= 1 else f"VALUE (MBS {mbs})")
+            tag = ("value",) if flag == "VALUE" else ("mbs",) if flag.startswith("VALUE") else ()
+            self.vt.insert("", "end", tags=tag, values=(
                 t.secim, f"%{100 * t.p_adil:.1f}", f"{t.adil_oran:.2f}", f"{t.oran:.2f}" if t.oran else "-",
                 f"{100 * t.ev_adil:+.1f}%" if not pd.isna(t.ev_adil) else "-", f"%{100 * t.p_model:.1f}",
                 f"{100 * t.ev_model:+.1f}%" if not pd.isna(t.ev_model) else "-", flag))
@@ -299,6 +323,11 @@ class DetailView(ttk.Frame):
                 note += (f"Geçmiş test (Bet365'e karşı, adil, EV>%5): ROI %{x['ROI_%']:+.1f} "
                          f"(aralık %{x['ROI_alt_%']:+.1f} / %{x['ROI_ust_%']:+.1f}). ")
         note += "Kanıtlanmış avantaj yok; EV(model) geçmişte zarar ettirdi. Kâr garantisi yoktur."
+        if (vt.secim == "KG Var").any():
+            note += " KG satırlarında adil olasılık yalnızca modelden gelir, VALUE işareti verilmez."
+        if mbs > 1:
+            note += (f" MBS {mbs}: bu maç tek oynanamaz; başka maçlarla kombine edince kâr payları çarpılır "
+                     f"ve avantaj büyük ölçüde kaybolur.")
         self.vnote.config(text=note)
 
     def recalc_value(self):
@@ -311,9 +340,11 @@ class DetailView(ttk.Frame):
                 return float(self.odds[k].get().replace(",", "."))
             except ValueError:
                 return None
-        o1 = tuple(num(k) for k in ("1", "X", "2"))
-        oo = tuple(num(k) for k in ("2.5 Üst", "2.5 Alt"))
-        vt = value_table(self.info["r"], o1 if all(o1) else None, oo if all(oo) else None)
+        def grp(keys, partial=False):
+            t = tuple(num(k) for k in keys)
+            return t if all(t) or (partial and any(t)) else None
+        vt = value_table(self.info["r"], grp(("1", "X", "2")), grp(("2.5 Üst", "2.5 Alt")),
+                         grp(("KG Var", "KG Yok"), True), grp(("1-X", "1-2", "X-2"), True))
         self._fill_value(vt)
 
     def run_ai(self):
@@ -518,6 +549,14 @@ class LiveTab(ttk.Frame):
             if "value_bahis" in oz:
                 txt += (f"\nValue bet (1 birim): {oz['value_bahis']} bahis, kâr {oz['value_kar']:+.2f} birim, "
                         f"ROI %{100 * oz['value_roi']:+.1f}")
+                if oz.get("value_bahis_iddaa"):
+                    txt += (f"   •   iddaa oranıyla: {oz['value_bahis_iddaa']} bahis, kâr "
+                            f"{oz['value_kar_iddaa']:+.2f}, ROI %{100 * oz['value_roi_iddaa']:+.1f}")
+            for k, lab in (("tahmin", "tahmin edilen sonuç"), ("value", "value seçimleri")):
+                if oz.get(f"clv_{k}_n"):
+                    txt += (f"\nOran hareketi ({lab}): ortalama %{100 * oz[f'clv_{k}']:+.1f}, "
+                            f"{oz[f'clv_{k}_n']} maçın %{100 * oz[f'clv_{k}_pozitif']:.0f}'inde oran düştü "
+                            f"(pozitif = piyasa sonradan modelin tarafına kaydı)")
             if n < 50:
                 txt += f"\nNot: {n} maç az bir örnek; oranlar ±%{100 * 1.96 * np.sqrt(0.25 / n):.0f} oynayabilir."
             self.summary.config(text=txt)

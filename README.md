@@ -255,6 +255,15 @@ Ne anlama geliyor:
 
 **İddaa oranları otomatik gelir (`src/nesine.py`).** Maç Nesine'nin maç öncesi bülteninde varsa maç detayındaki oran kutuları ve "Bu Hafta" listesindeki Value sütunu oynanabilir iddaa oranlarıyla doldurulur. Yasal sitelerin (Nesine, iddaa.com, Bilyoner, Misli, Oley) standart oranları aynı olduğu için tek kaynak yeterli. Maç henüz bültende değilse, başladıysa ya da internet yoksa ESPN/Bet365 oranları kullanılır; hangisinin kullanıldığı tablonun altında yazar. "Adil %" her zaman Bet365'ten hesaplanır. İddaa'nın kâr payı yüksek olduğu için (1X2'de ~%15) iddaa oranlarıyla value nadiren çıkar. Günün bütün bültenini CSV olarak almak için: `python oran_topla.py`.
 
+Maç detayındaki value tablosu iddaa'dan şunları da gösterir:
+
+- **Çifte Şans (1-X, 1-2, X-2)**: adil olasılık 1X2'den türetilir, VALUE işareti alabilir. Kapalı seçenek (oran 1,00) boş kalır.
+- **KG Var/Yok**: Bet365 verisinde bu pazar olmadığı için adil olasılık yalnızca modelden gelir; tabloda görünür ama VALUE işareti almaz ("yalnız model").
+- **İddaa payı**: maçın 1X2 oranlarındaki kâr payı (1/oran toplamı − 1). Genelde %15–19; value'nun nadir çıkmasının nedeni.
+- **MBS uyarısı**: maç tek oynanamıyorsa VALUE işareti sarı ve "VALUE (MBS 3)" olur. Kombine kuponda kâr payları çarpılır, avantaj büyük ölçüde kaybolur.
+
+**Oran hareketi (CLV).** `tracker.py kaydet` her çalıştığında (günlük güncellemeyle saatte bir) iddaa oranlarını `data/oran_gecmisi.csv`'ye ekler. Maçlar bittikçe `tracker.py durum` ve Canlı Takip sekmesi şunu raporlar: seçilen tarafın ilk kayıttaki oranı, maç öncesi son orana göre ne kadar yüksekti. Pozitifse piyasa sonradan modelin tarafına kaymış demektir. Avantaj olup olmadığını kâr/zarardan çok daha az maçla gösterir. Value kâr/zararı da iddaa oranları ve ESPN/Bet365 oranları için ayrı ayrı gösterilir.
+
 Bu bir kişisel analiz aracıdır; kâr garantisi yoktur. Türkiye'de yalnızca lisanslı (İddaa) bahis yasaldır. Sorumlu oynayın.
 
 ## Yapay zekâ katmanı nasıl çalışır
@@ -297,7 +306,8 @@ Akış:
 | `src/simulate.py` | Monte Carlo sezon simülasyonu |
 | `src/upset_model.py` | Sürpriz modeli: favorinin kaybetme olasılığı ve alarm seviyeleri |
 | `src/value.py` | Value bet: EV, adil oran, geçmiş kâr/zarar testi |
-| `src/nesine.py` | Nesine bülteninden güncel iddaa oranları ve takım adı eşleştirme |
+| `src/nesine.py` | Nesine bülteninden güncel iddaa oranları (1X2, 2,5 Alt/Üst, KG, Çifte Şans, MBS, iddaa payı) ve takım adı eşleştirme |
+| `data/oran_gecmisi.csv` | Her tahmin kaydında alınan iddaa oranları (oran hareketi raporu için) |
 | `oran_topla.py` | Günün bütün futbol bültenini `oranlar.csv` / `tum_oranlar.csv` olarak kaydeder |
 | `src/app.py`, `Nostradamus.pyw` | Masaüstü arayüzü ve başlatıcı |
 | `src/news.py` | Maç öncesi haber başlıkları (Google Haberler RSS + ESPN) |

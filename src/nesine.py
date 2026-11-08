@@ -16,12 +16,14 @@ import time
 import unicodedata
 import urllib.request
 from difflib import SequenceMatcher
+from pathlib import Path
 
 import pandas as pd
 
 URL = "https://bulten.nesine.com/api/bulten/getprebultenfull"
 CACHE_SEC = 300
 _cache = {"t": 0.0, "events": None}
+last_error = None  # son bağlantı hatası (uygulama notunda gösterilir)
 
 # Takım adlarından atılacak ekler / sponsor adları
 _DROP = {"fk", "sk", "as", "jk", "fc", "spor", "kulubu", "caykur", "rams", "corendon", "bitexen",
@@ -54,10 +56,11 @@ def _same(a, b):
     return SequenceMatcher(None, a, b).ratio()
 
 
-def bulletin():
-    """Futbol maçlarının listesi (önbellekli). Bağlantı koparsa 3 kez dener."""
-    if _cache["events"] is not None and time.time() - _cache["t"] < CACHE_SEC:
-        return _cache["events"]
+DISK = Path(__file__).resolve().parents[1] / "data" / "nesine_son.json.gz"  # son başarılı bülten
+DISK_MAX_SEC = 3 * 3600  # bağlantı koparsa en fazla bu kadar eski bülten kullanılır
+
+
+def _download():
     req = urllib.request.Request(URL, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130",
         "Accept-Encoding": "gzip", "Referer": "https://www.nesine.com/"})
@@ -72,8 +75,35 @@ def bulletin():
             time.sleep(1.5)
     if raw[:2] == b"\x1f\x8b":
         raw = gzip.decompress(raw)
-    ev = [e for e in json.loads(raw.decode("utf-8"))["sg"]["EA"] if e.get("GT") == 1 and e.get("HN")]
-    _cache.update(t=time.time(), events=ev)
+    return [e for e in json.loads(raw.decode("utf-8"))["sg"]["EA"] if e.get("GT") == 1 and e.get("HN")]
+
+
+def bulletin():
+    """Futbol maçlarının listesi (5 dk önbellekli). Bağlantı koparsa 3 kez dener; yine olmazsa
+    diskteki son başarılı bülteni (en fazla 3 saatlik) kullanır ve last_error'u doldurur."""
+    global last_error
+    if _cache["events"] is not None and time.time() - _cache["t"] < CACHE_SEC:
+        return _cache["events"]
+    try:
+        ev = _download()
+    except OSError as ex:
+        last_error = str(ex)
+        try:
+            age = time.time() - DISK.stat().st_mtime
+            if age > DISK_MAX_SEC:
+                raise ex
+            ev = json.loads(gzip.decompress(DISK.read_bytes()))
+        except (OSError, ValueError):
+            raise ex from None
+        # 1 dakika sonra yeniden denensin
+        _cache.update(t=time.time() - CACHE_SEC + 60, events=ev, fetched=DISK.stat().st_mtime, stale=True)
+        return ev
+    last_error = None
+    _cache.update(t=time.time(), events=ev, fetched=time.time(), stale=False)
+    try:
+        DISK.write_bytes(gzip.compress(json.dumps(ev, ensure_ascii=False).encode("utf-8")))
+    except OSError:
+        pass
     return ev
 
 
@@ -85,15 +115,11 @@ def _market(e, t, st, line=0.0):
     return None, {}
 
 
-last_error = None  # son bağlantı hatası (uygulama notunda gösterilir)
-
-
 def find_odds(date, home, away):
     """Maçı bültende bulur; yoksa None. Ağ hatasında da None ve last_error dolar."""
     global last_error
     try:
         events = bulletin()
-        last_error = None
     except Exception as ex:  # noqa: BLE001 - internet yoksa uygulama eski oranlara döner
         last_error = str(ex)
         return None
@@ -113,10 +139,24 @@ def find_odds(date, home, away):
         return None
     ms_m, ms = _market(best, 1, 1)
     _, au = _market(best, 2, 101, 2.5)
+    _, kg = _market(best, 2, 89)
+    _, cs = _market(best, 2, 92)
+
+    def tup(o, keys, partial=False):
+        """Seçenek oranları; kapalı seçenek None (partial) ya da pazarın tamamı None."""
+        if all(k in o for k in keys):
+            return tuple(o[k] for k in keys)
+        return tuple(o.get(k) for k in keys) if partial and o else None
+    o1x2 = tup(ms, (1, 2, 3))
     return dict(
-        o1x2=(ms[1], ms[2], ms[3]) if all(k in ms for k in (1, 2, 3)) else None,
-        oou=(au[2], au[1]) if 1 in au and 2 in au else None,  # (Üst, Alt) - value_table sırası
+        o1x2=o1x2,
+        oou=tup(au, (2, 1)),                # (Üst, Alt) - value_table sırası
+        okg=tup(kg, (1, 2), partial=True),  # (Var, Yok)
+        ocs=tup(cs, (1, 2, 3), partial=True),  # (1-X, 1-2, X-2); favorili maçta 1-X kapalı olabilir
+        marj=round(sum(1 / x for x in o1x2) - 1, 4) if o1x2 else None,  # 1X2'deki iddaa payı
         mbs=ms_m["MBS"] if ms_m else best.get("EMBS"),
+        zaman=time.strftime("%H:%M", time.localtime(_cache.get("fetched") or time.time())),
+        eski=bool(_cache.get("stale")),  # True: bağlantı koptu, diskteki son bülten kullanıldı
         saat=best.get("T"), ad=f"{best['HN']} - {best['AN']}", mac_no=best.get("C"))
 
 
