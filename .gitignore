@@ -8,3 +8,6 @@ ilan_bot/**/*_files/
 oranlar.csv
 tum_oranlar.csv
 data/nesine_son.json.gz
+ilan_bot/
+season_probability/
+iddaa_study/
