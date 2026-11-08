@@ -100,7 +100,7 @@ Masaüstündeki veya Başlat menüsündeki **Nostradamus** kısayoluna çift tı
 
 | Sekme | İçerik |
 |---|---|
-| Bu Hafta | Yaklaşan maçlar. Bir maç seçince: olasılık çubukları, skor ısı haritası, "Neden?" gerekçeleri, value tablosu (kendi oranlarınızı girip Hesapla), yapay zekâ analizi düğmesi |
+| Bu Hafta | Yaklaşan maçlar. Bir maç seçince: olasılık çubukları, skor ısı haritası, "Neden?" gerekçeleri, value tablosu (iddaa oranları otomatik gelir, değiştirip Hesapla'ya basılabilir), yapay zekâ analizi düğmesi |
 | Maç Tahmini | İki takım ve tarih seçip herhangi bir maçı tahmin etme |
 | Canlı Takip | Kayıtlı tahminler, canlı skorlar, isabet ve value kâr/zarar özeti; canlı maç varken dakikada bir yenilenir |
 | Sezon Simülasyonu | Şampiyonluk / Avrupa / küme düşme olasılıkları; yeniden çalıştırma düğmesi |
@@ -121,6 +121,22 @@ python -m venv .venv
 - `ANTHROPIC_API_KEY`: [platform.claude.com](https://platform.claude.com) adresinden alınır. Yapay zekâ analizi için gerekir.
 
 İki anahtar da isteğe bağlıdır. Anahtarsız çalışırsa açık kaynak skor verisi kullanılır ve yapay zekâ analizi yapılmaz.
+
+### İlk veri indirme
+
+`data/` ve `reports/` klasörleri depoda yoktur; veriler ve model dosyaları kurulumda üretilir. Uygulamayı ilk kez açmadan önce:
+
+```bash
+python src/espn_source.py           # 2017'den bugüne maçlar ve oranlar (ilk sefer ~40 dk)
+python src/livescore_source.py      # güncel sezon (yedek kaynak)
+python src/parse_openfootball.py    # kaynakları birleştir -> data/matches.csv
+python src/backtest.py              # model eğitimi ve geriye dönük test -> reports/
+python src/upset_model.py           # sürpriz modeli
+python src/value.py test            # value testi (Model Başarısı sekmesi için)
+python src/tracker.py kaydet        # yaklaşan maçların tahmini (Bu Hafta sekmesi için)
+```
+
+Sonrasında `python src/daily.py` (ya da uygulamadaki **Tam güncelle**) hepsini güncel tutar.
 
 ## Kullanım
 
@@ -329,3 +345,7 @@ Kaynaklar şu öncelikle birleştirilir: API-Football > ESPN > livescore > openf
 - **API-Football:** Ücretsiz plan günde 100 istek verir; bazı sezonlara erişim vermeyebilir (araç uyarır).
 - **Open-Meteo:** Ücretsiz. Çok sık istekte geçici sınır uygular; araç bekleyip yeniden dener.
 - football-data.co.uk Türkiye'den erişime kapalı.
+
+## Lisans
+
+Kod [MIT lisansıyla](LICENSE) paylaşılır. Veriler depoda yoktur; her kullanıcı yukarıdaki kaynaklardan kendisi indirir ve o kaynakların kullanım koşullarına uymaktan kendisi sorumludur. Bu araç bahis tavsiyesi değildir.
